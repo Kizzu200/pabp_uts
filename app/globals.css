@@ -5,6 +5,11 @@
   --foreground: #171717;
 }
 
+:root[data-theme="dark"] {
+  --background: #020617; /* zinc-950 */
+  --foreground: #f4f4f5; /* zinc-100 */
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

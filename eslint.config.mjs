@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Ignore backend Express server (plain JS, bukan bagian Next app)
+    "server/**",
   ]),
 ]);
 
