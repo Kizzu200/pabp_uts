@@ -1,14 +1,45 @@
-require("dotenv").config();
+import "dotenv/config";
 
-const express = require("express");
-const cors = require("cors");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const { OAuth2Client } = require("google-auth-library");
-const { createClient } = require("@supabase/supabase-js");
+import express, { type NextFunction, type Request, type Response } from "express";
+import cors from "cors";
+import bcrypt from "bcryptjs";
+import jwt, { type JwtPayload } from "jsonwebtoken";
+import { OAuth2Client } from "google-auth-library";
+import { createClient } from "@supabase/supabase-js";
+
+declare global {
+  namespace Express {
+    interface Request {
+      userId?: string;
+    }
+  }
+}
+
+type OAuthFrom = "login" | "register";
+
+type UserRow = {
+  id: string;
+  name: string | null;
+  email: string;
+  password_hash?: string;
+};
+
+type ScheduleRow = {
+  id: string;
+  hari: string;
+  mata_kuliah: string;
+  ruang: string | null;
+  jam_mulai: string;
+  jam_selesai: string;
+};
+
+type AppJwtPayload = JwtPayload & {
+  userId?: string;
+  type?: string;
+};
 
 const app = express();
-const PORT = process.env.API_PORT || 4000;
+const PORT = Number(process.env.API_PORT ?? 4000);
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
 const JWT_EXPIRES_IN = "15m";
 const REFRESH_EXPIRES_IN = "7d";
@@ -37,9 +68,9 @@ app.use(cors({
 app.use(express.json());
 
 // In-memory refresh token store (UTS sederhana, tanpa DB tabel refresh token)
-const refreshTokens = new Map(); // userId -> refreshToken string
+const refreshTokens = new Map<string, string>();
 
-function generateTokens(userId) {
+function generateTokens(userId: string) {
   const accessToken = jwt.sign({ userId }, JWT_SECRET, {
     expiresIn: JWT_EXPIRES_IN,
   });
@@ -50,19 +81,19 @@ function generateTokens(userId) {
   return { accessToken, refreshToken };
 }
 
-function normalizeName(email, nameFromGoogle) {
+function normalizeName(email: string, nameFromGoogle: unknown) {
   if (nameFromGoogle && String(nameFromGoogle).trim()) {
     return String(nameFromGoogle).trim();
   }
   return String(email || "pengguna").split("@")[0] || "pengguna";
 }
 
-async function upsertGoogleUser({ email, name, googleSub }) {
+async function upsertGoogleUser({ email, name, googleSub }: { email: string; name: string; googleSub: string }) {
   const { data: existing, error: existingError } = await supabase
     .from("users")
     .select("id, name, email")
     .eq("email", email)
-    .maybeSingle();
+    .maybeSingle<UserRow>();
 
   if (existingError) {
     throw new Error("Gagal memeriksa pengguna Google");
@@ -89,7 +120,7 @@ async function upsertGoogleUser({ email, name, googleSub }) {
     .from("users")
     .insert({ name, email, password_hash: hash })
     .select("id, name, email")
-    .single();
+    .single<UserRow>();
 
   if (insertError || !inserted) {
     console.error("Supabase error (insert user google)", insertError);
@@ -99,16 +130,16 @@ async function upsertGoogleUser({ email, name, googleSub }) {
   return inserted;
 }
 
-function encodeState(payload) {
+function encodeState(payload: { from: OAuthFrom }) {
   return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
 }
 
-function decodeState(state) {
+function decodeState(state: unknown): { from: OAuthFrom } {
   try {
     const raw = Buffer.from(String(state || ""), "base64url").toString("utf8");
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(raw) as { from?: string };
     if (parsed && (parsed.from === "login" || parsed.from === "register")) {
-      return parsed;
+      return { from: parsed.from };
     }
     return { from: "login" };
   } catch {
@@ -116,41 +147,41 @@ function decodeState(state) {
   }
 }
 
-function authPageUrl(from) {
+function authPageUrl(from: OAuthFrom) {
   if (from === "register") {
     return `${FRONTEND_BASE_URL}/auth/register`;
   }
   return `${FRONTEND_BASE_URL}/auth/login`;
 }
 
-function redirectWithParams(res, from, params) {
+function redirectWithParams(res: Response, from: OAuthFrom, params: Record<string, string>) {
   const target = new URL(authPageUrl(from));
   Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null) {
-      target.searchParams.set(key, String(value));
-    }
+    target.searchParams.set(key, value);
   });
   return res.redirect(target.toString());
 }
 
-function authMiddleware(req, res, next) {
-  const authHeader = req.headers["authorization"];
+function authMiddleware(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return res.status(401).json({ message: "Missing Authorization header" });
   }
   const token = authHeader.slice("Bearer ".length);
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
+    const payload = jwt.verify(token, JWT_SECRET) as AppJwtPayload;
+    if (!payload.userId) {
+      return res.status(401).json({ message: "Invalid or expired token" });
+    }
     req.userId = payload.userId;
     next();
-  } catch (err) {
+  } catch {
     return res.status(401).json({ message: "Invalid or expired token" });
   }
 }
 
-// Auth endpoints
-app.post("/api/auth/register", async (req, res) => {
-  const { name, email, password } = req.body || {};
+app.post("/api/auth/register", async (req: Request, res: Response) => {
+  const { name, email, password } = (req.body || {}) as { name?: string; email?: string; password?: string };
   if (!name || !email || !password) {
     return res.status(400).json({ message: "name, email, password wajib diisi" });
   }
@@ -160,7 +191,7 @@ app.post("/api/auth/register", async (req, res) => {
       .from("users")
       .select("id")
       .eq("email", email)
-      .maybeSingle();
+      .maybeSingle<{ id: string }>();
 
     if (existingError) {
       console.error("Supabase error (cek email)", existingError);
@@ -177,7 +208,7 @@ app.post("/api/auth/register", async (req, res) => {
       .from("users")
       .insert({ name, email, password_hash: hash })
       .select("id, name, email")
-      .single();
+      .single<UserRow>();
 
     if (insertError || !inserted) {
       console.error("Supabase error (insert user)", insertError);
@@ -185,18 +216,18 @@ app.post("/api/auth/register", async (req, res) => {
     }
 
     const tokens = generateTokens(inserted.id);
-    res.status(201).json({
+    return res.status(201).json({
       user: inserted,
       ...tokens,
     });
   } catch (err) {
     console.error("Register error", err);
-    res.status(500).json({ message: "Terjadi kesalahan saat registrasi" });
+    return res.status(500).json({ message: "Terjadi kesalahan saat registrasi" });
   }
 });
 
-app.post("/api/auth/login", async (req, res) => {
-  const { email, password } = req.body || {};
+app.post("/api/auth/login", async (req: Request, res: Response) => {
+  const { email, password } = (req.body || {}) as { email?: string; password?: string };
   if (!email || !password) {
     return res.status(400).json({ message: "email dan password wajib diisi" });
   }
@@ -206,62 +237,16 @@ app.post("/api/auth/login", async (req, res) => {
       .from("users")
       .select("id, name, email, password_hash")
       .eq("email", email)
-      .single();
+      .single<UserRow>();
 
     if (error || !user) {
       return res.status(401).json({ message: "Email atau password salah" });
     }
 
-    const ok = await bcrypt.compare(password, user.password_hash);
+    const ok = await bcrypt.compare(password, user.password_hash || "");
     if (!ok) {
       return res.status(401).json({ message: "Email atau password salah" });
     }
-
-    const tokens = generateTokens(user.id);
-    res.json({
-      user: { id: user.id, name: user.name, email: user.email },
-      ...tokens,
-    });
-  } catch (err) {
-    console.error("Login error", err);
-    res.status(500).json({ message: "Terjadi kesalahan saat login" });
-  }
-});
-
-app.post("/api/auth/google", async (req, res) => {
-  const { idToken } = req.body || {};
-
-  if (!googleTokenVerifier || !GOOGLE_CLIENT_ID) {
-    return res.status(500).json({
-      message: "Google OAuth belum dikonfigurasi. Set GOOGLE_CLIENT_ID di .env",
-    });
-  }
-
-  if (!idToken) {
-    return res.status(400).json({ message: "idToken wajib diisi" });
-  }
-
-  try {
-    const ticket = await googleTokenVerifier.verifyIdToken({
-      idToken,
-      audience: GOOGLE_CLIENT_ID,
-    });
-    const payload = ticket.getPayload();
-
-    if (!payload || !payload.email || !payload.sub) {
-      return res.status(401).json({ message: "Token Google tidak valid" });
-    }
-
-    if (!payload.email_verified) {
-      return res.status(401).json({ message: "Email Google belum terverifikasi" });
-    }
-
-    const normalizedName = normalizeName(payload.email, payload.name);
-    const user = await upsertGoogleUser({
-      email: payload.email,
-      name: normalizedName,
-      googleSub: payload.sub,
-    });
 
     const tokens = generateTokens(user.id);
     return res.json({
@@ -269,19 +254,19 @@ app.post("/api/auth/google", async (req, res) => {
       ...tokens,
     });
   } catch (err) {
-    console.error("Google auth error", err);
-    return res.status(401).json({ message: "Autentikasi Google gagal" });
+    console.error("Login error", err);
+    return res.status(500).json({ message: "Terjadi kesalahan saat login" });
   }
 });
 
-app.get("/api/auth/google/start", (req, res) => {
+app.get("/api/auth/google/start", (req: Request, res: Response) => {
   if (!googleAuthClient || !GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
     return res.status(500).json({
       message: "Google OAuth belum lengkap. Set GOOGLE_CLIENT_ID dan GOOGLE_CLIENT_SECRET",
     });
   }
 
-  const from = req.query.from === "register" ? "register" : "login";
+  const from: OAuthFrom = req.query.from === "register" ? "register" : "login";
   const state = encodeState({ from });
   const authUrl = googleAuthClient.generateAuthUrl({
     access_type: "offline",
@@ -294,11 +279,11 @@ app.get("/api/auth/google/start", (req, res) => {
   return res.redirect(authUrl);
 });
 
-app.get("/api/auth/google/callback", async (req, res) => {
-  const { code, state, error } = req.query || {};
+app.get("/api/auth/google/callback", async (req: Request, res: Response) => {
+  const { code, state, error } = req.query;
   const { from } = decodeState(state);
 
-  if (!googleAuthClient || !GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+  if (!googleAuthClient || !googleTokenVerifier || !GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
     return redirectWithParams(res, from, {
       oauth: "error",
       message: "Google OAuth belum lengkap di server",
@@ -308,7 +293,7 @@ app.get("/api/auth/google/callback", async (req, res) => {
   if (error) {
     return redirectWithParams(res, from, {
       oauth: "error",
-      message: `Google OAuth dibatalkan: ${error}`,
+      message: `Google OAuth dibatalkan: ${String(error)}`,
     });
   }
 
@@ -365,14 +350,14 @@ app.get("/api/auth/google/callback", async (req, res) => {
   }
 });
 
-app.post("/api/auth/refresh", (req, res) => {
-  const { refreshToken } = req.body || {};
+app.post("/api/auth/refresh", (req: Request, res: Response) => {
+  const { refreshToken } = (req.body || {}) as { refreshToken?: string };
   if (!refreshToken) {
     return res.status(400).json({ message: "refreshToken wajib diisi" });
   }
   try {
-    const payload = jwt.verify(refreshToken, JWT_SECRET);
-    if (payload.type !== "refresh") {
+    const payload = jwt.verify(refreshToken, JWT_SECRET) as AppJwtPayload;
+    if (payload.type !== "refresh" || !payload.userId) {
       return res.status(400).json({ message: "Token bukan refresh token" });
     }
     const stored = refreshTokens.get(payload.userId);
@@ -380,22 +365,20 @@ app.post("/api/auth/refresh", (req, res) => {
       return res.status(401).json({ message: "Refresh token tidak dikenal" });
     }
     const tokens = generateTokens(payload.userId);
-    res.json(tokens);
+    return res.json(tokens);
   } catch {
     return res.status(401).json({ message: "Refresh token tidak valid atau kedaluwarsa" });
   }
 });
 
-app.post("/api/auth/logout", authMiddleware, (req, res) => {
-  refreshTokens.delete(req.userId);
-  res.json({ message: "Logout berhasil" });
+app.post("/api/auth/logout", authMiddleware, (req: Request, res: Response) => {
+  if (req.userId) {
+    refreshTokens.delete(req.userId);
+  }
+  return res.json({ message: "Logout berhasil" });
 });
 
-// CRUD resource: Tugas
-// Model Supabase: { id (uuid), user_id, title, description, deadline, completed }
-
-// [CRUD] READ - list tasks
-app.get("/api/tasks", authMiddleware, async (req, res) => {
+app.get("/api/tasks", authMiddleware, async (req: Request, res: Response) => {
   try {
     const { data, error } = await supabase
       .from("tasks")
@@ -408,16 +391,19 @@ app.get("/api/tasks", authMiddleware, async (req, res) => {
       return res.status(500).json({ message: "Gagal mengambil tugas" });
     }
 
-    res.json(data || []);
+    return res.json(data || []);
   } catch (err) {
     console.error("Get tasks error", err);
-    res.status(500).json({ message: "Terjadi kesalahan saat mengambil tugas" });
+    return res.status(500).json({ message: "Terjadi kesalahan saat mengambil tugas" });
   }
 });
 
-// [CRUD] CREATE - create task
-app.post("/api/tasks", authMiddleware, async (req, res) => {
-  const { title, description, deadline } = req.body || {};
+app.post("/api/tasks", authMiddleware, async (req: Request, res: Response) => {
+  const { title, description, deadline } = (req.body || {}) as {
+    title?: string;
+    description?: string;
+    deadline?: string;
+  };
   if (!title || !deadline) {
     return res.status(400).json({ message: "title dan deadline wajib diisi" });
   }
@@ -440,19 +426,23 @@ app.post("/api/tasks", authMiddleware, async (req, res) => {
       return res.status(500).json({ message: "Gagal membuat tugas" });
     }
 
-    res.status(201).json(task);
+    return res.status(201).json(task);
   } catch (err) {
     console.error("Create task error", err);
-    res.status(500).json({ message: "Terjadi kesalahan saat membuat tugas" });
+    return res.status(500).json({ message: "Terjadi kesalahan saat membuat tugas" });
   }
 });
 
-// [CRUD] UPDATE - update task
-app.put("/api/tasks/:id", authMiddleware, async (req, res) => {
+app.put("/api/tasks/:id", authMiddleware, async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { title, description, deadline, completed } = req.body || {};
+  const { title, description, deadline, completed } = (req.body || {}) as {
+    title?: string;
+    description?: string;
+    deadline?: string;
+    completed?: boolean;
+  };
 
-  const updateData = {};
+  const updateData: Record<string, string | boolean> = {};
   if (title !== undefined) updateData.title = title;
   if (description !== undefined) updateData.description = description;
   if (deadline !== undefined) updateData.deadline = deadline;
@@ -476,15 +466,14 @@ app.put("/api/tasks/:id", authMiddleware, async (req, res) => {
       return res.status(404).json({ message: "Tugas tidak ditemukan" });
     }
 
-    res.json(task);
+    return res.json(task);
   } catch (err) {
     console.error("Update task error", err);
-    res.status(500).json({ message: "Terjadi kesalahan saat mengubah tugas" });
+    return res.status(500).json({ message: "Terjadi kesalahan saat mengubah tugas" });
   }
 });
 
-// [CRUD] DELETE - delete task
-app.delete("/api/tasks/:id", authMiddleware, async (req, res) => {
+app.delete("/api/tasks/:id", authMiddleware, async (req: Request, res: Response) => {
   const { id } = req.params;
 
   try {
@@ -505,14 +494,14 @@ app.delete("/api/tasks/:id", authMiddleware, async (req, res) => {
       return res.status(404).json({ message: "Tugas tidak ditemukan" });
     }
 
-    res.status(204).send();
+    return res.status(204).send();
   } catch (err) {
     console.error("Delete task error", err);
-    res.status(500).json({ message: "Terjadi kesalahan saat menghapus tugas" });
+    return res.status(500).json({ message: "Terjadi kesalahan saat menghapus tugas" });
   }
 });
 
-function mapScheduleRow(row) {
+function mapScheduleRow(row: ScheduleRow) {
   return {
     id: row.id,
     hari: row.hari,
@@ -523,11 +512,7 @@ function mapScheduleRow(row) {
   };
 }
 
-// CRUD resource: Jadwal
-// Model Supabase: { id (uuid), user_id, hari, mata_kuliah, ruang, jam_mulai, jam_selesai }
-
-// [CRUD] READ - list schedules
-app.get("/api/schedules", authMiddleware, async (req, res) => {
+app.get("/api/schedules", authMiddleware, async (req: Request, res: Response) => {
   try {
     const { data, error } = await supabase
       .from("schedules")
@@ -541,16 +526,21 @@ app.get("/api/schedules", authMiddleware, async (req, res) => {
       return res.status(500).json({ message: "Gagal mengambil jadwal" });
     }
 
-    res.json((data || []).map(mapScheduleRow));
+    return res.json((data || []).map((row) => mapScheduleRow(row as ScheduleRow)));
   } catch (err) {
     console.error("Get schedules error", err);
-    res.status(500).json({ message: "Terjadi kesalahan saat mengambil jadwal" });
+    return res.status(500).json({ message: "Terjadi kesalahan saat mengambil jadwal" });
   }
 });
 
-// [CRUD] CREATE - create schedule
-app.post("/api/schedules", authMiddleware, async (req, res) => {
-  const { hari, mataKuliah, ruang, jamMulai, jamSelesai } = req.body || {};
+app.post("/api/schedules", authMiddleware, async (req: Request, res: Response) => {
+  const { hari, mataKuliah, ruang, jamMulai, jamSelesai } = (req.body || {}) as {
+    hari?: string;
+    mataKuliah?: string;
+    ruang?: string;
+    jamMulai?: string;
+    jamSelesai?: string;
+  };
   if (!hari || !mataKuliah || !jamMulai || !jamSelesai) {
     return res.status(400).json({ message: "hari, mataKuliah, jamMulai, jamSelesai wajib diisi" });
   }
@@ -567,26 +557,31 @@ app.post("/api/schedules", authMiddleware, async (req, res) => {
         jam_selesai: jamSelesai,
       })
       .select("id, hari, mata_kuliah, ruang, jam_mulai, jam_selesai")
-      .single();
+      .single<ScheduleRow>();
 
     if (error || !schedule) {
       console.error("Supabase error (create schedule)", error);
       return res.status(500).json({ message: "Gagal membuat jadwal" });
     }
 
-    res.status(201).json(mapScheduleRow(schedule));
+    return res.status(201).json(mapScheduleRow(schedule));
   } catch (err) {
     console.error("Create schedule error", err);
-    res.status(500).json({ message: "Terjadi kesalahan saat membuat jadwal" });
+    return res.status(500).json({ message: "Terjadi kesalahan saat membuat jadwal" });
   }
 });
 
-// [CRUD] UPDATE - update schedule
-app.put("/api/schedules/:id", authMiddleware, async (req, res) => {
+app.put("/api/schedules/:id", authMiddleware, async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { hari, mataKuliah, ruang, jamMulai, jamSelesai } = req.body || {};
+  const { hari, mataKuliah, ruang, jamMulai, jamSelesai } = (req.body || {}) as {
+    hari?: string;
+    mataKuliah?: string;
+    ruang?: string;
+    jamMulai?: string;
+    jamSelesai?: string;
+  };
 
-  const updateData = {};
+  const updateData: Record<string, string> = {};
   if (hari !== undefined) updateData.hari = hari;
   if (mataKuliah !== undefined) updateData.mata_kuliah = mataKuliah;
   if (ruang !== undefined) updateData.ruang = ruang;
@@ -600,7 +595,7 @@ app.put("/api/schedules/:id", authMiddleware, async (req, res) => {
       .eq("id", id)
       .eq("user_id", req.userId)
       .select("id, hari, mata_kuliah, ruang, jam_mulai, jam_selesai")
-      .maybeSingle();
+      .maybeSingle<ScheduleRow>();
 
     if (error) {
       console.error("Supabase error (update schedule)", error);
@@ -611,15 +606,14 @@ app.put("/api/schedules/:id", authMiddleware, async (req, res) => {
       return res.status(404).json({ message: "Jadwal tidak ditemukan" });
     }
 
-    res.json(mapScheduleRow(schedule));
+    return res.json(mapScheduleRow(schedule));
   } catch (err) {
     console.error("Update schedule error", err);
-    res.status(500).json({ message: "Terjadi kesalahan saat mengubah jadwal" });
+    return res.status(500).json({ message: "Terjadi kesalahan saat mengubah jadwal" });
   }
 });
 
-// [CRUD] DELETE - delete schedule
-app.delete("/api/schedules/:id", authMiddleware, async (req, res) => {
+app.delete("/api/schedules/:id", authMiddleware, async (req: Request, res: Response) => {
   const { id } = req.params;
 
   try {
@@ -640,15 +634,15 @@ app.delete("/api/schedules/:id", authMiddleware, async (req, res) => {
       return res.status(404).json({ message: "Jadwal tidak ditemukan" });
     }
 
-    res.status(204).send();
+    return res.status(204).send();
   } catch (err) {
     console.error("Delete schedule error", err);
-    res.status(500).json({ message: "Terjadi kesalahan saat menghapus jadwal" });
+    return res.status(500).json({ message: "Terjadi kesalahan saat menghapus jadwal" });
   }
 });
 
-app.get("/api/health", (req, res) => {
-  res.json({ status: "ok" });
+app.get("/api/health", (_req: Request, res: Response) => {
+  return res.json({ status: "ok" });
 });
 
 app.listen(PORT, () => {

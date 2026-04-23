@@ -3,30 +3,106 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
+import { GoogleLogo } from "@/components/google-logo";
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
+const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? "";
+
+function persistSession(data: {
+  accessToken: string;
+  refreshToken: string;
+  user: { email: string; name?: string | null };
+}) {
+  if (typeof window === "undefined") return;
+
+  window.localStorage.setItem("accessToken", data.accessToken);
+  window.localStorage.setItem("refreshToken", data.refreshToken);
+  window.localStorage.setItem("userEmail", data.user.email);
+  if (data.user.name) {
+    window.localStorage.setItem("userName", data.user.name);
+  } else {
+    window.localStorage.removeItem("userName");
+  }
+
+  const fifteenMinutes = 15 * 60;
+  const sevenDays = 7 * 24 * 60 * 60;
+  document.cookie = `accessToken=${encodeURIComponent(
+    data.accessToken,
+  )}; Max-Age=${fifteenMinutes}; path=/`;
+  document.cookie = `refreshToken=${encodeURIComponent(
+    data.refreshToken,
+  )}; Max-Age=${sevenDays}; path=/`;
+  document.cookie = `userEmail=${encodeURIComponent(
+    data.user.email,
+  )}; Max-Age=${sevenDays}; path=/`;
+  if (data.user.name) {
+    document.cookie = `userName=${encodeURIComponent(
+      data.user.name,
+    )}; Max-Age=${sevenDays}; path=/`;
+  } else {
+    document.cookie = "userName=; Max-Age=0; path=/";
+  }
+}
 
 export default function RegisterPage() {
   const router = useRouter();
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    if (typeof window === "undefined") return "light";
-    const stored = window.localStorage.getItem("theme");
-    if (stored === "light" || stored === "dark") return stored;
-    return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
-      ? "dark"
-      : "light";
-  });
+  const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [mounted, setMounted] = useState(false);
   const isDark = theme === "dark";
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem("theme");
+    if (stored === "light" || stored === "dark") {
+      setTheme(stored);
+    } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+      setTheme("dark");
+    }
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !mounted) return;
     document.documentElement.dataset.theme = theme;
     window.localStorage.setItem("theme", theme);
-  }, [theme]);
+  }, [theme, mounted]);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!mounted || typeof window === "undefined") return;
+
+    const url = new URL(window.location.href);
+    const oauth = url.searchParams.get("oauth");
+    if (!oauth) return;
+
+    if (oauth === "success") {
+      const accessToken = url.searchParams.get("accessToken") || "";
+      const refreshToken = url.searchParams.get("refreshToken") || "";
+      const userEmail = url.searchParams.get("userEmail") || "";
+      const userName = url.searchParams.get("userName") || "";
+
+      if (accessToken && refreshToken && userEmail) {
+        persistSession({
+          accessToken,
+          refreshToken,
+          user: { email: userEmail, name: userName || null },
+        });
+        router.replace("/");
+        return;
+      }
+      setMessage("Data callback Google tidak lengkap");
+    } else {
+      setMessage(url.searchParams.get("message") || "Register Google gagal");
+    }
+
+    router.replace("/auth/register");
+  }, [mounted, router]);
+
+  const googleAuthUrl = "/api/auth/google/start?from=register";
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -43,36 +119,7 @@ export default function RegisterPage() {
         setMessage(data?.message || "Registrasi gagal");
         return;
       }
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem("accessToken", data.accessToken);
-        window.localStorage.setItem("refreshToken", data.refreshToken);
-        window.localStorage.setItem("userEmail", data.user.email);
-        if (data.user && data.user.name) {
-          window.localStorage.setItem("userName", data.user.name);
-        } else {
-          window.localStorage.removeItem("userName");
-        }
-
-        // Simpan juga ke cookie sebagai bagian dari demonstrasi penggunaan cookie
-        const fifteenMinutes = 15 * 60;
-        const sevenDays = 7 * 24 * 60 * 60;
-        document.cookie = `accessToken=${encodeURIComponent(
-          data.accessToken,
-        )}; Max-Age=${fifteenMinutes}; path=/`;
-        document.cookie = `refreshToken=${encodeURIComponent(
-          data.refreshToken,
-        )}; Max-Age=${sevenDays}; path=/`;
-        document.cookie = `userEmail=${encodeURIComponent(
-          data.user.email,
-        )}; Max-Age=${sevenDays}; path=/`;
-        if (data.user && data.user.name) {
-          document.cookie = `userName=${encodeURIComponent(
-            data.user.name,
-          )}; Max-Age=${sevenDays}; path=/`;
-        } else {
-          document.cookie = "userName=; Max-Age=0; path=/";
-        }
-      }
+      persistSession(data);
       setMessage("Registrasi berhasil, mengalihkan ke halaman utama...");
       router.push("/");
     } catch {
@@ -158,11 +205,28 @@ export default function RegisterPage() {
             {loading ? "Memproses..." : "Daftar"}
           </button>
         </form>
+        <div className="my-4 flex items-center gap-2">
+          <div className="h-px flex-1 bg-zinc-300" />
+          <span className="text-[11px] text-zinc-500">atau</span>
+          <div className="h-px flex-1 bg-zinc-300" />
+        </div>
+        {!GOOGLE_CLIENT_ID ? (
+          <p className="text-xs text-amber-600">
+            NEXT_PUBLIC_GOOGLE_CLIENT_ID belum diisi di .env
+          </p>
+        ) : (
+          <a
+            href={googleAuthUrl}
+            className="inline-flex w-full items-center justify-center gap-2 rounded-full border border-zinc-300 px-4 py-2 text-xs font-medium hover:bg-zinc-100"
+          >
+            <GoogleLogo />
+            Daftar dengan Google
+          </a>
+        )}
         {message && (
           <p className="mt-3 text-xs text-zinc-700">{message}</p>
         )}
         <p className="mt-4 text-[11px] text-zinc-500">
-          Setelah berhasil register, token akan tersimpan di localStorage dan dapat digunakan pada halaman utama untuk mengelola tugas.
         </p>
       </div>
     </div>
